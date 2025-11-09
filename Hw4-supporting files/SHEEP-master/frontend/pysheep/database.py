@@ -1,0 +1,151 @@
+"""
+SQLAlchemy classes to describe the tables of benchmark measurements.
+"""
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy import Column, ForeignKey, Integer, String, Boolean, Float
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import create_engine
+from sqlalchemy import and_, or_
+
+import sqlite3
+
+from . import common_utils
+
+
+### location of the sqlite file holding the DB
+### (at some point may replace with e.g. postgres DB, but
+### this will only require minimal changes, thanks to sqlalchemy).
+
+if "SHEEP_HOME" in os.environ.keys():
+    if "pysheep" in os.environ["SHEEP_HOME"]:
+        DB_LOCATION = os.path.join(os.environ["SHEEP_HOME"],"sheep.db")
+    else:
+        DB_LOCATION = os.path.join(os.environ["SHEEP_HOME"],"pysheep","sheep.db")
+else:
+    # Use HOME on Unix-like systems, USERPROFILE on Windows
+    home_dir = os.environ.get("HOME") or os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    db_dir = os.path.join(home_dir,"SHEEP")
+    # Create directory if it doesn't exist
+    os.makedirs(db_dir, exist_ok=True)
+    DB_LOCATION = os.path.join(db_dir,"sheep.db")
+
+Base = declarative_base()
+engine = create_engine("sqlite:///"+DB_LOCATION)
+
+
+class BenchmarkMeasurement(Base):
+    __tablename__ = "benchmarks"
+    benchmark_id = Column(Integer, primary_key=True,autoincrement=True)
+    context = Column(String(250), nullable=False)
+    input_bitwidth = Column(Integer, nullable=False)
+    input_signed = Column(Boolean, nullable=False)
+    circuit_name = Column(String(250), nullable=False)
+    num_inputs = Column(Integer, nullable=False)
+    num_slots = Column(Integer, nullable=False)
+    tbb_enabled = Column(Boolean, nullable=False)
+    is_correct = Column(Boolean, nullable=False)
+    timings = relationship("Timing", uselist=True)
+    parameters = relationship("ParameterSetting",uselist=True)
+    scan_id = Column(String(250), nullable=True)
+
+
+class CiphertextMeasurement(Base):
+    __tablename__ = "ciphertext"
+    ciphertext_id = Column(Integer, primary_key=True,autoincrement=True)
+    context = Column(String(250), nullable=False)
+    input_bitwidth = Column(Integer, nullable=False)
+    num_slots = Column(Integer, nullable=False)
+    ciphertext_size = Column(Integer, nullable=False)
+    parameters  = relationship("ParameterSetting",uselist=True)
+
+
+class Timing(Base):
+    __tablename__ = "timings"
+    id = Column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    timing_name = Column(String(100), nullable=False)
+    timing_value = Column(Float, nullable=False)
+    benchmark_id = Column(Integer, ForeignKey("benchmarks.benchmark_id"),nullable=True)
+
+class ParameterSetting(Base):
+    __tablename__ = "param"
+    id = Column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    param_name = Column(String(100), nullable=False)
+    param_value = Column(Integer, nullable=False)
+    benchmark_id = Column(Integer, ForeignKey("benchmarks.benchmark_id"))
+    ciphertext_id = Column(Integer, ForeignKey("ciphertext.ciphertext_id"),nullable=True)
+
+Base.metadata.create_all(engine)
+
+Base.metadata.bind = engine
+DBSession = sessionmaker(bind=engine)
+session = DBSession()
+
+
+def upload_benchmark_result(circuit_name,
+                            context,
+                            input_type,
+                            num_inputs,
+                            num_slots,
+                            tbb_enabled,
+                            results_dict,
+                            params_dict,
+                            scan_id = None):
+    """
+    upload a benchmark result, either from web frontend or notebook.
+    """
+
+    bm = BenchmarkMeasurement()
+    bm.context = context
+    bm.input_bitwidth = common_utils.get_bitwidth(input_type)
+    bm.input_signed = input_type.startswith("int")
+    bm.circuit_name = circuit_name
+    bm.is_correct = results_dict['cleartext check']['is_correct']
+    bm.num_inputs = num_inputs
+    bm.num_slots = num_slots
+    bm.tbb_enabled = tbb_enabled
+    if scan_id:
+        bm.scan_id = scan_id
+    session.add(bm)
+    session.commit()
+    for k,v in results_dict['timings'].items():
+        t = Timing()
+        t.timing_name = k
+        t.timing_value = float(v)
+        t.benchmark_id = bm.benchmark_id
+        session.add(t)
+    for k,v in params_dict.items():
+        p = ParameterSetting()
+        p.param_name = k
+        p.param_value = v
+        p.benchmark_id = bm.benchmark_id
+        session.add(p)
+    session.commit()
+    return True
+
+
+def upload_ciphertext_result(context,
+                             input_type,
+                             nslots,
+                             ct_size,
+                             param_dict):
+    """
+    Upload nslots, serialized ciphertext size, and parameters
+    """
+    cm = CiphertextMeasurement()
+    cm.context = context
+    cm.input_bitwidth = common_utils.get_bitwidth(input_type)
+    cm.num_slots = nslots
+    cm.ciphertext_size = ct_size
+    session.add(cm)
+    session.commit()
+    cm.ciphertext_size = ct_size
+    for k,v in param_dict.items():
+        p = ParameterSetting()
+        p.param_name = k
+        p.param_value = v
+        p.ciphertext_id = cm.ciphertext_id
+        session.add(p)
+    session.commit()
